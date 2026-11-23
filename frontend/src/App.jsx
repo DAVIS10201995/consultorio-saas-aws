@@ -44,7 +44,7 @@ function Login({ onLogin }) {
     e.preventDefault()
     try {
       const d = await api(null, '/login', { method: 'POST', body: JSON.stringify({ email, password }) })
-      onLogin(d.token, d.rol)
+      onLogin(d)
     } catch (err) {
       setError(err.message)
     }
@@ -70,7 +70,7 @@ function Pacientes({ token, rol }) {
   const [ultima, setUltima] = useState(1)
   const [nuevo, setNuevo] = useState({ nombre: '', telefono: '', email: '' })
   const [error, setError] = useState('')
-  const puedeEditar = ['recepcion', 'admin'].includes(rol)
+  const puedeEditar = ['capturista', 'admin'].includes(rol)
 
   async function cargar(pag = pagina) {
     try {
@@ -125,14 +125,14 @@ function Pacientes({ token, rol }) {
   )
 }
 
-function Citas({ token, rol }) {
+function Citas({ token, rol, esDentista }) {
   const [lista, setLista] = useState([])
   const [nueva, setNueva] = useState({ paciente_id: '', dentista_id: '', inicio: '', duracion_min: 30 })
   const [error, setError] = useState('')
   const [filtroEstado, setFiltroEstado] = useState('')
   const [pagina, setPagina] = useState(1)
   const [ultima, setUltima] = useState(1)
-  const puedeCrear = ['recepcion', 'admin'].includes(rol)
+  const puedeCrear = ['capturista', 'admin'].includes(rol)
 
   async function cargar(pag = pagina, estado = filtroEstado) {
     try {
@@ -174,8 +174,10 @@ function Citas({ token, rol }) {
     }
   }
 
+  // La interfaz solo oculta botones; quien decide es la API (403 si no corresponde).
+  const puedeEscribir = ['capturista', 'admin'].includes(rol)
   const permitidos = (c) =>
-    (SIGUIENTES[c.estado] || []).filter((s) => (CLINICOS.includes(s) ? rol === 'dentista' : rol !== 'dentista'))
+    (SIGUIENTES[c.estado] || []).filter((s) => puedeEscribir && (CLINICOS.includes(s) ? esDentista : true))
 
   return (
     <div>
@@ -230,8 +232,8 @@ export default function App() {
   const [sesion, setSesion] = useState(() => JSON.parse(sessionStorage.getItem('sesion') || 'null'))
   const [vista, setVista] = useState('pacientes')
 
-  function entrar(token, rol) {
-    const s = { token, rol }
+  function entrar(d) {
+    const s = { token: d.token, rol: d.rol, esDentista: d.es_dentista, organizacion: d.organizacion.nombre }
     sessionStorage.setItem('sesion', JSON.stringify(s))
     setSesion(s)
   }
@@ -247,13 +249,13 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <strong>Consultorio</strong>
+        <strong>{sesion.organizacion}</strong>
         <button onClick={() => setVista('pacientes')}>Pacientes</button>
         <button onClick={() => setVista('citas')}>Citas</button>
-        <span>Rol: {sesion.rol}</span>
+        <span>Rol: {sesion.rol}{sesion.esDentista ? ' (dentista)' : ''}</span>
         <button onClick={salir}>Salir</button>
       </header>
-      {vista === 'pacientes' ? <Pacientes token={sesion.token} rol={sesion.rol} /> : <Citas token={sesion.token} rol={sesion.rol} />}
+      {vista === 'pacientes' ? <Pacientes token={sesion.token} rol={sesion.rol} /> : <Citas token={sesion.token} rol={sesion.rol} esDentista={sesion.esDentista} />}
     </div>
   )
 }
