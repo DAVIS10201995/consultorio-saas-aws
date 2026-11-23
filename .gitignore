@@ -1,0 +1,23 @@
+# Secretos y variables de entorno
+.env
+.env.*
+!.env.example
+.secrets/
+
+# Llaves y credenciales de AWS
+*.pem
+*.key
+*.ppk
+.aws/
+credentials
+
+# Terraform/CLI (por si se usan después)
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Sistema y editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
