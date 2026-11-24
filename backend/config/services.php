@@ -28,6 +28,14 @@ return [
         'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
     ],
 
+    // Bitácora de eventos. En local: DynamoDB Local (DYNAMODB_ENDPOINT).
+    // En AWS no hay endpoint ni llaves: el SDK usa el rol IAM de la instancia.
+    'dynamodb' => [
+        'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
+        'endpoint' => env('DYNAMODB_ENDPOINT'),
+        'tabla' => env('DYNAMODB_TABLE', 'consultorio-bitacora'),
+    ],
+
     'slack' => [
         'notifications' => [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),

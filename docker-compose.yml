@@ -51,7 +51,12 @@ services:
 
   dynamodb:
     image: amazon/dynamodb-local:latest
-    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    # Guarda en disco (volumen dynamodata) para no perder la bitácora al reiniciar.
+    user: root
+    working_dir: /home/dynamodblocal
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "./data"]
+    volumes:
+      - dynamodata:/home/dynamodblocal/data
     ports:
       - "127.0.0.1:8000:8000"
 
@@ -64,6 +69,18 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
+  # Publica los eventos del outbox en DynamoDB.
+  worker:
+    image: consultorio-api:local
+    command: ["php", "artisan", "outbox:publicar"]
+    environment: *laravel-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dynamodb:
+        condition: service_started
+    restart: unless-stopped
 
   # Tarea puntual: docker compose run --rm migrar
   migrar:
@@ -80,3 +97,4 @@ services:
 
 volumes:
   pgdata:
+  dynamodata:

@@ -20,6 +20,7 @@ Route::middleware(['auth:sanctum', ResolverMembresia::class])->group(function ()
     Route::get('/pacientes/{id}', [PacienteController::class, 'show'])->whereNumber('id');
     Route::get('/citas', [CitaController::class, 'index']);
     Route::get('/citas/{id}', [CitaController::class, 'show'])->whereNumber('id');
+    Route::get('/citas/{id}/historial', [CitaController::class, 'historial'])->whereNumber('id');
 
     // Escritura: administrador y capturista.
     Route::middleware(RolRequerido::class.':admin,capturista')->group(function () {

@@ -3,7 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Cita;
-use App\Models\Membresia;
+use App\Services\Bitacora;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
@@ -62,6 +62,22 @@ class CitaController extends Controller
         }
 
         return $cita;
+    }
+
+    /** Historial desde DynamoDB. La PK se arma con la organización autorizada, nunca con datos del cliente. */
+    public function historial(Request $request, int $id, Bitacora $bitacora)
+    {
+        $m = $this->membresia($request);
+        $cita = Cita::deOrganizacion($m->organizacion_id)->findOrFail($id);
+
+        if ($m->vistaDeDentista() && $cita->dentista_id !== $m->usuario_id) {
+            abort(404);
+        }
+
+        return response()->json([
+            'cita_id' => $cita->id,
+            'eventos' => $bitacora->historial($m->organizacion_id, $cita->id),
+        ]);
     }
 
     public function store(Request $request)
@@ -184,7 +200,7 @@ class CitaController extends Controller
                 'estado_anterior' => $anterior,
                 'estado_nuevo' => $nuevo,
                 'usuario_id' => $usuarioId,
-                'fecha' => now()->toIso8601String(),
+                'fecha' => now()->format('Y-m-d\TH:i:s.uP'), // con microsegundos: ordena eventos del mismo segundo
             ]),
         ]);
     }
