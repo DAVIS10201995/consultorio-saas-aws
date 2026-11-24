@@ -9,9 +9,9 @@ class RolRequerido
 {
     public function handle(Request $request, Closure $next, string ...$roles)
     {
-        $usuario = $request->user();
+        $membresia = $request->attributes->get('membresia');
 
-        if (! $usuario || ! in_array($usuario->rol, $roles, true)) {
+        if (! $membresia || ! in_array($membresia->rol, $roles, true)) {
             return response()->json(['mensaje' => 'No autorizado para esta acción'], 403);
         }
 

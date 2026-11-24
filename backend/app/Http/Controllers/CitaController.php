@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Cita;
+use App\Services\Bitacora;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
@@ -26,15 +27,15 @@ class CitaController extends Controller
             'hasta' => ['nullable', 'date'],
         ]);
 
-        $consulta = Cita::query()->orderBy('inicio', 'desc');
+        $m = $this->membresia($request);
+        $consulta = Cita::deOrganizacion($m->organizacion_id)->orderBy('inicio', 'desc');
 
-        $usuario = $request->user();
-        if ($usuario->rol === 'dentista') {
-            $consulta->where('dentista_id', $usuario->id);
+        if ($m->vistaDeDentista()) {
+            $consulta->where('dentista_id', $m->usuario_id);
         }
 
         foreach (['dentista_id', 'paciente_id', 'estado'] as $campo) {
-            if ($campo === 'dentista_id' && $usuario->rol === 'dentista') {
+            if ($campo === 'dentista_id' && $m->vistaDeDentista()) {
                 continue;
             }
             if ($valor = $request->query($campo)) {
@@ -53,27 +54,50 @@ class CitaController extends Controller
 
     public function show(Request $request, int $id)
     {
-        $cita = Cita::findOrFail($id);
-        $usuario = $request->user();
+        $m = $this->membresia($request);
+        $cita = Cita::deOrganizacion($m->organizacion_id)->findOrFail($id);
 
-        if ($usuario->rol === 'dentista' && $cita->dentista_id !== $usuario->id) {
+        if ($m->vistaDeDentista() && $cita->dentista_id !== $m->usuario_id) {
             abort(404);
         }
 
         return $cita;
     }
 
+    /** Historial desde DynamoDB. La PK se arma con la organización autorizada, nunca con datos del cliente. */
+    public function historial(Request $request, int $id, Bitacora $bitacora)
+    {
+        $m = $this->membresia($request);
+        $cita = Cita::deOrganizacion($m->organizacion_id)->findOrFail($id);
+
+        if ($m->vistaDeDentista() && $cita->dentista_id !== $m->usuario_id) {
+            abort(404);
+        }
+
+        return response()->json([
+            'cita_id' => $cita->id,
+            'eventos' => $bitacora->historial($m->organizacion_id, $cita->id),
+        ]);
+    }
+
     public function store(Request $request)
     {
+        $m = $this->membresia($request);
+        $org = $m->organizacion_id;
+
         $datos = $request->validate([
-            'paciente_id' => ['required', 'integer', 'exists:pacientes,id'],
-            'dentista_id' => ['required', 'integer', Rule::exists('usuarios', 'id')->where('rol', 'dentista')->where('activo', true)],
+            'paciente_id' => ['required', 'integer', Rule::exists('pacientes', 'id')->where('organizacion_id', $org)],
+            'dentista_id' => [
+                'required', 'integer',
+                Rule::exists('membresias', 'usuario_id')->where('organizacion_id', $org)->where('es_dentista', true),
+                Rule::exists('usuarios', 'id')->where('activo', true),
+            ],
             'inicio' => ['required', 'date'],
             'duracion_min' => ['required', 'integer', 'in:30,60,90'],
             'motivo' => ['nullable', 'string', 'max:255'],
         ]);
 
-        $inicio = Carbon::parse($datos['inicio'])->setTimezone(config('app.timezone'));
+        $inicio = Carbon::parse($datos['inicio'])->setTimezone(config('app.zona_consultorio'));
         $fin = $inicio->copy()->addMinutes($datos['duracion_min']);
 
         if ($inicio->isPast()) {
@@ -87,6 +111,7 @@ class CitaController extends Controller
         }
 
         $faltas = DB::table('citas')
+            ->where('organizacion_id', $org)
             ->where('paciente_id', $datos['paciente_id'])
             ->where('estado', 'no_asistio')
             ->where('inicio', '>=', now()->subMonths(6))
@@ -94,16 +119,18 @@ class CitaController extends Controller
         $estado = $faltas >= 2 ? 'pendiente_confirmacion' : 'programada';
 
         try {
-            $cita = DB::transaction(function () use ($datos, $inicio, $fin, $estado, $request) {
-                $cita = Cita::create([
+            $cita = DB::transaction(function () use ($datos, $inicio, $fin, $estado, $m) {
+                $cita = new Cita([
                     'paciente_id' => $datos['paciente_id'],
                     'dentista_id' => $datos['dentista_id'],
-                    'inicio' => $inicio,
-                    'fin' => $fin,
+                    'inicio' => $inicio->copy()->utc(),
+                    'fin' => $fin->copy()->utc(),
                     'estado' => $estado,
                     'motivo' => $datos['motivo'] ?? null,
                 ]);
-                $this->registrarEvento($cita, null, $estado, $request->user()->id);
+                $cita->organizacion_id = $m->organizacion_id;
+                $cita->save();
+                $this->registrarEvento($cita, null, $estado, $m->usuario_id);
 
                 return $cita;
             });
@@ -123,13 +150,13 @@ class CitaController extends Controller
             'estado' => ['required', Rule::in(['confirmada', 'en_atencion', 'completada', 'cancelada', 'no_asistio'])],
         ]);
 
-        $usuario = $request->user();
+        $m = $this->membresia($request);
         $nuevo = $datos['estado'];
 
-        return DB::transaction(function () use ($id, $nuevo, $usuario) {
-            $cita = Cita::lockForUpdate()->find($id);
+        return DB::transaction(function () use ($id, $nuevo, $m) {
+            $cita = Cita::deOrganizacion($m->organizacion_id)->lockForUpdate()->find($id);
             if (! $cita) {
-                return response()->json(['mensaje' => 'Cita no encontrada'], 404);
+                return response()->json(['mensaje' => 'Recurso no encontrado'], 404);
             }
 
             $actual = $cita->estado;
@@ -137,12 +164,10 @@ class CitaController extends Controller
                 return response()->json(['mensaje' => "No se puede pasar de {$actual} a {$nuevo}"], 409);
             }
 
-            if (in_array($nuevo, ['en_atencion', 'completada'], true)) {
-                if ($usuario->rol !== 'dentista' || $usuario->id !== $cita->dentista_id) {
-                    return response()->json(['mensaje' => 'Solo el dentista asignado puede realizar este cambio'], 403);
-                }
-            } elseif (! in_array($usuario->rol, ['recepcion', 'admin'], true)) {
-                return response()->json(['mensaje' => 'No autorizado para esta acción'], 403);
+            // Pasos clínicos: solo el dentista asignado. El resto: admin o capturista (ya filtrado en la ruta).
+            if (in_array($nuevo, ['en_atencion', 'completada'], true)
+                && (! $m->es_dentista || $cita->dentista_id !== $m->usuario_id)) {
+                return response()->json(['mensaje' => 'Solo el dentista asignado puede realizar este cambio'], 403);
             }
 
             if ($nuevo === 'no_asistio' && now()->lessThan($cita->inicio)) {
@@ -155,7 +180,7 @@ class CitaController extends Controller
 
             $cita->estado = $nuevo;
             $cita->save();
-            $this->registrarEvento($cita, $actual, $nuevo, $usuario->id);
+            $this->registrarEvento($cita, $actual, $nuevo, $m->usuario_id);
 
             return response()->json($cita);
         });
@@ -164,16 +189,18 @@ class CitaController extends Controller
     private function registrarEvento(Cita $cita, ?string $anterior, string $nuevo, int $usuarioId): void
     {
         DB::table('outbox')->insert([
+            'organizacion_id' => $cita->organizacion_id,
             'event_id' => (string) Str::uuid(),
             'tipo' => 'cita.estado_cambiado',
             'payload' => json_encode([
+                'organizacion_id' => $cita->organizacion_id,
                 'cita_id' => $cita->id,
                 'paciente_id' => $cita->paciente_id,
                 'dentista_id' => $cita->dentista_id,
                 'estado_anterior' => $anterior,
                 'estado_nuevo' => $nuevo,
                 'usuario_id' => $usuarioId,
-                'fecha' => now()->toIso8601String(),
+                'fecha' => now()->format('Y-m-d\TH:i:s.uP'), // con microsegundos: ordena eventos del mismo segundo
             ]),
         ]);
     }

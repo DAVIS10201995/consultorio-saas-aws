@@ -44,7 +44,7 @@ function Login({ onLogin }) {
     e.preventDefault()
     try {
       const d = await api(null, '/login', { method: 'POST', body: JSON.stringify({ email, password }) })
-      onLogin(d.token, d.rol)
+      onLogin(d)
     } catch (err) {
       setError(err.message)
     }
@@ -70,7 +70,7 @@ function Pacientes({ token, rol }) {
   const [ultima, setUltima] = useState(1)
   const [nuevo, setNuevo] = useState({ nombre: '', telefono: '', email: '' })
   const [error, setError] = useState('')
-  const puedeEditar = ['recepcion', 'admin'].includes(rol)
+  const puedeEditar = ['capturista', 'admin'].includes(rol)
 
   async function cargar(pag = pagina) {
     try {
@@ -125,14 +125,15 @@ function Pacientes({ token, rol }) {
   )
 }
 
-function Citas({ token, rol }) {
+function Citas({ token, rol, esDentista }) {
   const [lista, setLista] = useState([])
   const [nueva, setNueva] = useState({ paciente_id: '', dentista_id: '', inicio: '', duracion_min: 30 })
   const [error, setError] = useState('')
   const [filtroEstado, setFiltroEstado] = useState('')
+  const [historial, setHistorial] = useState(null)
   const [pagina, setPagina] = useState(1)
   const [ultima, setUltima] = useState(1)
-  const puedeCrear = ['recepcion', 'admin'].includes(rol)
+  const puedeCrear = ['capturista', 'admin'].includes(rol)
 
   async function cargar(pag = pagina, estado = filtroEstado) {
     try {
@@ -165,6 +166,14 @@ function Citas({ token, rol }) {
     }
   }
 
+  async function verHistorial(id) {
+    try {
+      setHistorial(await api(token, '/citas/' + id + '/historial'))
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   async function cambiar(id, estado) {
     try {
       await api(token, '/citas/' + id + '/estado', { method: 'POST', body: JSON.stringify({ estado }) })
@@ -174,8 +183,10 @@ function Citas({ token, rol }) {
     }
   }
 
+  // La interfaz solo oculta botones; quien decide es la API (403 si no corresponde).
+  const puedeEscribir = ['capturista', 'admin'].includes(rol)
   const permitidos = (c) =>
-    (SIGUIENTES[c.estado] || []).filter((s) => (CLINICOS.includes(s) ? rol === 'dentista' : rol !== 'dentista'))
+    (SIGUIENTES[c.estado] || []).filter((s) => puedeEscribir && (CLINICOS.includes(s) ? esDentista : true))
 
   return (
     <div>
@@ -213,6 +224,7 @@ function Citas({ token, rol }) {
               <td>{new Date(c.inicio).toLocaleString('es-MX')}</td>
               <td>{c.estado}</td>
               <td>
+                <button onClick={() => verHistorial(c.id)}>Historial</button>
                 {permitidos(c).map((s) => (
                   <button key={s} onClick={() => cambiar(c.id, s)}>{s}</button>
                 ))}
@@ -222,6 +234,31 @@ function Citas({ token, rol }) {
         </tbody>
       </table>
       <Paginacion pagina={pagina} ultima={ultima} onCambiar={cargar} />
+      {historial && (
+        <div>
+          <h4>
+            Historial de la cita {historial.cita_id} (DynamoDB){' '}
+            <button onClick={() => setHistorial(null)}>Cerrar</button>
+          </h4>
+          {historial.eventos.length === 0 ? (
+            <p>Sin eventos todavía: el worker los publica en unos segundos.</p>
+          ) : (
+            <table>
+              <thead><tr><th>Fecha</th><th>De</th><th>A</th><th>Usuario</th></tr></thead>
+              <tbody>
+                {historial.eventos.map((e) => (
+                  <tr key={e.event_id}>
+                    <td>{new Date(e.fecha).toLocaleString('es-MX')}</td>
+                    <td>{e.estado_anterior || '—'}</td>
+                    <td>{e.estado_nuevo}</td>
+                    <td>{e.usuario_id}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -230,8 +267,8 @@ export default function App() {
   const [sesion, setSesion] = useState(() => JSON.parse(sessionStorage.getItem('sesion') || 'null'))
   const [vista, setVista] = useState('pacientes')
 
-  function entrar(token, rol) {
-    const s = { token, rol }
+  function entrar(d) {
+    const s = { token: d.token, rol: d.rol, esDentista: d.es_dentista, organizacion: d.organizacion.nombre }
     sessionStorage.setItem('sesion', JSON.stringify(s))
     setSesion(s)
   }
@@ -247,13 +284,13 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <strong>Consultorio</strong>
+        <strong>{sesion.organizacion}</strong>
         <button onClick={() => setVista('pacientes')}>Pacientes</button>
         <button onClick={() => setVista('citas')}>Citas</button>
-        <span>Rol: {sesion.rol}</span>
+        <span>Rol: {sesion.rol}{sesion.esDentista ? ' (dentista)' : ''}</span>
         <button onClick={salir}>Salir</button>
       </header>
-      {vista === 'pacientes' ? <Pacientes token={sesion.token} rol={sesion.rol} /> : <Citas token={sesion.token} rol={sesion.rol} />}
+      {vista === 'pacientes' ? <Pacientes token={sesion.token} rol={sesion.rol} /> : <Citas token={sesion.token} rol={sesion.rol} esDentista={sesion.esDentista} />}
     </div>
   )
 }

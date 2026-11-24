@@ -1,0 +1,118 @@
+# Entorno local del consultorio SaaS.
+# Uso: copiar .env.example a .env, poner valores propios y correr
+#   docker compose up -d --build
+name: consultorio-saas
+
+x-laravel-env: &laravel-env
+  APP_NAME: consultorio
+  APP_ENV: local
+  APP_DEBUG: ${APP_DEBUG:-true}
+  SANCTUM_EXPIRATION: ${SANCTUM_EXPIRATION:-480}
+  APP_KEY: ${APP_KEY:?falta APP_KEY en .env}
+  APP_TIMEZONE: America/Mexico_City
+  AUTH_MODEL: App\Models\Usuario
+  LOG_CHANNEL: stderr
+  SESSION_DRIVER: array
+  CACHE_STORE: database   # el límite de solicitudes necesita una caché compartida
+  QUEUE_CONNECTION: sync
+  DB_CONNECTION: pgsql
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_DATABASE: consultorio
+  DB_USERNAME: consultorio_app
+  DB_PASSWORD: ${APP_PW:?falta APP_PW en .env}
+  # DynamoDB Local: credenciales ficticias, solo para el entorno local.
+  # En AWS la EC2 usa su rol IAM y no lleva llaves.
+  DYNAMODB_ENDPOINT: http://dynamodb:8000
+  DYNAMODB_TABLE: consultorio-bitacora
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: local
+  AWS_SECRET_ACCESS_KEY: local
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: consultorio
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?falta POSTGRES_PASSWORD en .env}
+      MIGRADOR_PW: ${MIGRADOR_PW:?falta MIGRADOR_PW en .env}
+      APP_PW: ${APP_PW:?falta APP_PW en .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/roles.sql:/db/roles.sql:ro
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d consultorio"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  dynamodb:
+    image: amazon/dynamodb-local:latest
+    # Guarda en disco (volumen dynamodata) para no perder la bitácora al reiniciar.
+    user: root
+    working_dir: /home/dynamodblocal
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "./data"]
+    volumes:
+      - dynamodata:/home/dynamodblocal/data
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  api:
+    build: ./backend
+    image: consultorio-api:local
+    environment: *laravel-env
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Frontend React con Vite en http://localhost:5173 (reenvía /api a la API).
+  # Build para S3: docker compose run --rm web npm run build  -> frontend/dist
+  web:
+    image: node:24-alpine
+    working_dir: /app
+    command: ["sh", "-c", "npm ci && npm run dev"]
+    environment:
+      API_PROXY: http://api:8080
+    volumes:
+      - ./frontend:/app
+      - web_node_modules:/app/node_modules
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      - api
+
+  # Publica los eventos del outbox en DynamoDB.
+  worker:
+    image: consultorio-api:local
+    command: ["php", "artisan", "outbox:publicar"]
+    environment: *laravel-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dynamodb:
+        condition: service_started
+    restart: unless-stopped
+
+  # Tarea puntual: docker compose run --rm migrar
+  migrar:
+    image: consultorio-api:local
+    profiles: ["tareas"]
+    command: ["php", "artisan", "migrate", "--force"]
+    environment:
+      <<: *laravel-env
+      DB_USERNAME: consultorio_migrador
+      DB_PASSWORD: ${MIGRADOR_PW}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  dynamodata:
+  web_node_modules:

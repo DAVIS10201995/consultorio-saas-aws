@@ -2,7 +2,7 @@
 FROM composer:2 AS vendor
 WORKDIR /app
 COPY composer.json composer.lock ./
-RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist --no-interaction --ignore-platform-req=ext-mongodb
+RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist --no-interaction
 COPY . .
 RUN composer dump-autoload --no-dev --optimize
 
@@ -12,8 +12,6 @@ FROM php:8.4-apache
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libpq-dev \
  && docker-php-ext-install pdo_pgsql opcache \
- && pecl install mongodb \
- && docker-php-ext-enable mongodb \
  && a2enmod rewrite \
  && mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini" \
  && sed -i 's/^expose_php.*/expose_php = Off/' "$PHP_INI_DIR/php.ini" \
