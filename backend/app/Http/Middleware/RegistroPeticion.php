@@ -16,7 +16,12 @@ class RegistroPeticion
 {
     public function handle(Request $request, Closure $next)
     {
-        $id = (string) Str::uuid();
+        // Si la petición viene de un proxy de confianza (nginx) se reutiliza su id,
+        // así nginx y Laravel registran el mismo. De cualquier otro origen se ignora.
+        $entrante = (string) $request->header('X-Request-Id');
+        $id = $request->isFromTrustedProxy() && preg_match('/^[A-Za-z0-9-]{8,64}$/', $entrante)
+            ? $entrante
+            : (string) Str::uuid();
         $inicio = hrtime(true);
 
         // Todo lo que se registre durante esta petición (también errores) lleva el id.
