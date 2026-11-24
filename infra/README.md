@@ -13,9 +13,11 @@ Todo lo que se pueda se crea con CloudFormation, por tres razones:
 | Orden | Stack | Plantilla | Issue |
 |---|---|---|---|
 | 1 | `consultorio-red` | `cloudformation/01-red.yaml` | #13 |
-| 2 | `consultorio-datos` | `cloudformation/02-datos.yaml` (pendiente) | #15, #16 |
-| 3 | `consultorio-app` | `cloudformation/03-app.yaml` (pendiente) | #14 |
-| 4 | `consultorio-cdn` | `cloudformation/04-cdn.yaml` (pendiente) | #17, #18 |
+| 2 | `consultorio-ec2` | `cloudformation/02-ec2.yaml` | #14 |
+| 3 | `consultorio-datos` | `cloudformation/03-datos.yaml` | #15, #16, #18 |
+| 4 | `consultorio-cdn` | `cloudformation/04-cdn.yaml` | #17 |
+
+La EC2 va antes que los datos porque el stack de datos agrega permisos de DynamoDB y S3 al rol de la instancia, y el grupo de seguridad de RDS ya acepta a la EC2 desde el stack de red.
 
 Cada stack exporta sus salidas (IDs de VPC, subredes, grupos de seguridad) y el siguiente las importa con `Fn::ImportValue`.
 
@@ -47,17 +49,43 @@ Primero obtén el ID de la lista de prefijos de CloudFront para us-east-2:
 aws ec2 describe-managed-prefix-lists --region us-east-2 --profile consultorio --filters Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing --query "PrefixLists[0].PrefixListId" --output text
 ```
 
-Después crea el stack, poniendo ese ID y tu IP pública (por ejemplo, de `curl ifconfig.me`) con `/32` al final:
+Después crea el stack con ese ID. No pongas `AdminCidr`: así no se abre el puerto 22 y la administración se hace por SSM Session Manager.
 
 ```powershell
-aws cloudformation deploy --region us-east-2 --profile consultorio --stack-name consultorio-red --template-file infra/cloudformation/01-red.yaml --parameter-overrides CloudFrontPrefixListId=pl-XXXXXXXX AdminCidr=203.0.113.10/32 --tags Proyecto=consultorio-saas
+aws cloudformation deploy --region us-east-2 --profile consultorio --stack-name consultorio-red --template-file infra/cloudformation/01-red.yaml --parameter-overrides CloudFrontPrefixListId=pl-XXXXXXXX --tags Proyecto=consultorio-saas
 ```
+
+Solo si necesitaras SSH, agrega `AdminCidr=<tu IP>/32` (tu IP sale de `curl ifconfig.me`).
 
 Para comprobar las salidas:
 
 ```powershell
 aws cloudformation describe-stacks --region us-east-2 --profile consultorio --stack-name consultorio-red --query "Stacks[0].Outputs" --output table
 ```
+
+## Stack 2: EC2 (#14)
+
+```powershell
+aws cloudformation deploy --region us-east-2 --profile consultorio --stack-name consultorio-ec2 --template-file infra/cloudformation/02-ec2.yaml --capabilities CAPABILITY_NAMED_IAM --tags Proyecto=consultorio-saas
+```
+
+Verificación y evidencias: `docs/infra/14-ec2.md`.
+
+## Stack 3: datos (#15, #16, #18)
+
+```powershell
+aws cloudformation deploy --region us-east-2 --profile consultorio --stack-name consultorio-datos --template-file infra/cloudformation/03-datos.yaml --capabilities CAPABILITY_NAMED_IAM --tags Proyecto=consultorio-saas
+```
+
+Después se crean las cuentas de la base con `db/roles.sql` (rama `main`). Pasos, pruebas y evidencias: `docs/infra/15-16-18-datos.md`.
+
+## Stack 4: frontend y CDN (#17)
+
+```powershell
+aws cloudformation deploy --region us-east-2 --profile consultorio --stack-name consultorio-cdn --template-file infra/cloudformation/04-cdn.yaml --tags Proyecto=consultorio-saas
+```
+
+Subida del frontend, pruebas y evidencias: `docs/infra/17-cdn.md`.
 
 ## Costos que evitamos a propósito
 
@@ -68,6 +96,22 @@ aws cloudformation describe-stacks --region us-east-2 --profile consultorio --st
 ## Retiro (#33)
 
 Se borra en orden inverso (`04` → `01`):
+
+```powershell
+aws cloudformation delete-stack --region us-east-2 --profile consultorio --stack-name consultorio-cdn
+```
+
+(Vaciar antes el bucket del frontend.)
+
+```powershell
+aws cloudformation delete-stack --region us-east-2 --profile consultorio --stack-name consultorio-datos
+```
+
+(Vaciar antes el bucket de respaldos.)
+
+```powershell
+aws cloudformation delete-stack --region us-east-2 --profile consultorio --stack-name consultorio-ec2
+```
 
 ```powershell
 aws cloudformation delete-stack --region us-east-2 --profile consultorio --stack-name consultorio-red

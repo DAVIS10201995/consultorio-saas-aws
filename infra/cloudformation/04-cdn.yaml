@@ -1,0 +1,147 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Consultorio SaaS - Frontend y CDN (issue 17). Bucket S3 privado y cifrado
+  que solo lee esta distribucion de CloudFront (OAC), HTTPS con el dominio
+  cloudfront.net y segundo origen hacia la EC2 para /api/*.
+  Requiere el stack de la EC2 (02-ec2.yaml).
+
+Parameters:
+  Proyecto:
+    Type: String
+    Default: consultorio
+    Description: Debe ser el mismo prefijo usado en los otros stacks.
+
+Resources:
+  # ---------- Bucket del frontend ----------
+  BucketFrontend:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete # vaciarlo antes de borrar el stack (#33)
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub "${Proyecto}-frontend-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - { Key: Proyecto, Value: !Ref Proyecto }
+
+  PoliticaBucketFrontend:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BucketFrontend
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SoloEstaDistribucion
+            Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub "${BucketFrontend.Arn}/*"
+            Condition:
+              StringEquals:
+                "AWS:SourceArn": !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribucion}"
+          - Sid: SoloTLS
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt BucketFrontend.Arn
+              - !Sub "${BucketFrontend.Arn}/*"
+            Condition:
+              Bool: { "aws:SecureTransport": "false" }
+
+  # ---------- CloudFront ----------
+  ControlAccesoOrigen:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${Proyecto}-frontend-oac"
+        Description: CloudFront firma cada peticion al bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CabecerasFrontend:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub "${Proyecto}-frontend-cabeceras"
+        SecurityHeadersConfig:
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: false
+            Override: true
+          ContentTypeOptions: { Override: true }
+          FrameOptions: { FrameOption: DENY, Override: true }
+          ReferrerPolicy: { ReferrerPolicy: no-referrer, Override: true }
+          ContentSecurityPolicy:
+            # unsafe-inline solo en estilos: index.html trae un bloque <style>
+            ContentSecurityPolicy: >-
+              default-src 'self'; style-src 'self' 'unsafe-inline';
+              img-src 'self' data:; object-src 'none'; base-uri 'self';
+              frame-ancestors 'none'
+            Override: true
+
+  Distribucion:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub "${Proyecto} SaaS"
+        Enabled: true
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        DefaultRootObject: index.html
+        Origins:
+          - Id: s3-frontend
+            DomainName: !GetAtt BucketFrontend.RegionalDomainName
+            OriginAccessControlId: !GetAtt ControlAccesoOrigen.Id
+            S3OriginConfig:
+              OriginAccessIdentity: "" # vacio: se usa OAC
+          - Id: ec2-api
+            DomainName: !ImportValue
+              Fn::Sub: "${Proyecto}-DnsApi"
+            CustomOriginConfig:
+              # HTTP: sin dominio propio no hay certificado valido en la EC2,
+              # y CloudFront rechaza los autofirmados. Riesgo documentado.
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+              OriginReadTimeout: 30
+        DefaultCacheBehavior:
+          TargetOriginId: s3-frontend
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+          ResponseHeadersPolicyId: !Ref CabecerasFrontend
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: ec2-api
+            ViewerProtocolPolicy: https-only # nunca un token por HTTP
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # Managed-CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # Managed-AllViewerExceptHostHeader (reenvia Authorization)
+        # Sin CustomErrorResponses: son de toda la distribucion y cambiarian
+        # los 401/403/404 de la API por la pagina de inicio.
+      Tags:
+        - { Key: Proyecto, Value: !Ref Proyecto }
+
+Outputs:
+  UrlPublica:
+    Value: !Sub "https://${Distribucion.DomainName}"
+  DistribucionId:
+    Value: !Ref Distribucion
+  BucketFrontend:
+    Value: !Ref BucketFrontend
+  UrlDirectaS3:
+    Description: Debe responder 403 (P05)
+    Value: !Sub "https://${BucketFrontend.RegionalDomainName}/index.html"
