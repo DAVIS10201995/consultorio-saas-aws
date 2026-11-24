@@ -39,7 +39,7 @@ class SembrarDatos extends Command
             return self::SUCCESS;
         }
 
-        $tz = config('app.timezone');
+        $tz = config('app.zona_consultorio');
 
         // 25 días laborables: unos 14 en el pasado y el resto en el futuro, relativos a hoy.
         $dias = [];
@@ -129,7 +129,7 @@ class SembrarDatos extends Command
             'programada' => ['programada'],
             'pendiente_confirmacion' => ['pendiente_confirmacion'],
         ];
-        $hoy = Carbon::now(config('app.timezone'))->startOfDay();
+        $hoy = Carbon::now(config('app.zona_consultorio'))->startOfDay();
 
         for ($i = 0; $i < self::CITAS; $i++) {
             $dent = $i % 2;
@@ -146,8 +146,8 @@ class SembrarDatos extends Command
                 'paciente_id' => $pacientes[$p],
                 'dentista_id' => $dentistas[$dent],
                 'plan_id' => $planes[$p] ?? null,
-                'inicio' => $inicio,
-                'fin' => $fin,
+                'inicio' => $inicio->copy()->utc(),
+                'fin' => $fin->copy()->utc(),
                 'estado' => $estado,
                 'motivo' => self::PROCEDIMIENTOS[$i % 8],
             ]);

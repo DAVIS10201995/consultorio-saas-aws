@@ -97,7 +97,7 @@ class CitaController extends Controller
             'motivo' => ['nullable', 'string', 'max:255'],
         ]);
 
-        $inicio = Carbon::parse($datos['inicio'])->setTimezone(config('app.timezone'));
+        $inicio = Carbon::parse($datos['inicio'])->setTimezone(config('app.zona_consultorio'));
         $fin = $inicio->copy()->addMinutes($datos['duracion_min']);
 
         if ($inicio->isPast()) {
@@ -123,8 +123,8 @@ class CitaController extends Controller
                 $cita = new Cita([
                     'paciente_id' => $datos['paciente_id'],
                     'dentista_id' => $datos['dentista_id'],
-                    'inicio' => $inicio,
-                    'fin' => $fin,
+                    'inicio' => $inicio->copy()->utc(),
+                    'fin' => $fin->copy()->utc(),
                     'estado' => $estado,
                     'motivo' => $datos['motivo'] ?? null,
                 ]);

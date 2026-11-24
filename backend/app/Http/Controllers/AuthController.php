@@ -24,9 +24,10 @@ class AuthController extends Controller
             return response()->json(['mensaje' => 'Credenciales inválidas'], 401);
         }
 
-        $token = $usuario->createToken('api')->plainTextToken;
+        $expira = now()->addMinutes(config('sanctum.expiration'));
+        $token = $usuario->createToken('api', ['*'], $expira)->plainTextToken;
 
-        return response()->json(['token' => $token] + $this->perfil($usuario, $membresia));
+        return response()->json(['token' => $token, 'expira_en' => $expira->toIso8601String()] + $this->perfil($usuario, $membresia));
     }
 
     public function yo(Request $request)

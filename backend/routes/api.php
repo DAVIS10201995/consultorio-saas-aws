@@ -8,10 +8,10 @@ use App\Http\Middleware\ResolverMembresia;
 use App\Http\Middleware\RolRequerido;
 use Illuminate\Support\Facades\Route;
 
-Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:5,1');
+Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:login');
 
 // Toda ruta protegida: identidad (Sanctum) + organización y rol desde la membresía.
-Route::middleware(['auth:sanctum', ResolverMembresia::class])->group(function () {
+Route::middleware(['auth:sanctum', 'throttle:api', ResolverMembresia::class])->group(function () {
     Route::get('/yo', [AuthController::class, 'yo']);
     Route::post('/logout', [AuthController::class, 'logout']);
 

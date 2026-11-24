@@ -67,6 +67,10 @@ return [
 
     'timezone' => 'UTC',
 
+    // Zona horaria del consultorio: se usa para las reglas de horario (9:00 a 18:00).
+    // Las fechas se guardan siempre en UTC.
+    'zona_consultorio' => env('CONSULTORIO_TIMEZONE', 'America/Mexico_City'),
+
     /*
     |--------------------------------------------------------------------------
     | Application Locale Configuration

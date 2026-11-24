@@ -6,13 +6,14 @@ name: consultorio-saas
 x-laravel-env: &laravel-env
   APP_NAME: consultorio
   APP_ENV: local
-  APP_DEBUG: "true"
+  APP_DEBUG: ${APP_DEBUG:-true}
+  SANCTUM_EXPIRATION: ${SANCTUM_EXPIRATION:-480}
   APP_KEY: ${APP_KEY:?falta APP_KEY en .env}
   APP_TIMEZONE: America/Mexico_City
   AUTH_MODEL: App\Models\Usuario
   LOG_CHANNEL: stderr
   SESSION_DRIVER: array
-  CACHE_STORE: array
+  CACHE_STORE: database   # el límite de solicitudes necesita una caché compartida
   QUEUE_CONNECTION: sync
   DB_CONNECTION: pgsql
   DB_HOST: postgres
