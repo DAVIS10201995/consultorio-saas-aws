@@ -23,6 +23,10 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE, CREATE ON SCHEMA public TO consultorio_migrador;
 GRANT USAGE ON SCHEMA public TO consultorio_app;
 
+-- En RDS el usuario maestro no es superusuario: necesita ser miembro del migrador
+-- para fijar sus privilegios por defecto. En local (superusuario) no hace daño.
+GRANT consultorio_migrador TO CURRENT_USER;
+
 -- Lo que cree el migrador, la app lo puede usar (pero no alterar).
 ALTER DEFAULT PRIVILEGES FOR ROLE consultorio_migrador IN SCHEMA public
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO consultorio_app;

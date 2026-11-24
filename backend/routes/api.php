@@ -4,11 +4,15 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CitaController;
 use App\Http\Controllers\MiembroController;
 use App\Http\Controllers\PacienteController;
+use App\Http\Controllers\SaludController;
 use App\Http\Middleware\ResolverMembresia;
 use App\Http\Middleware\RolRequerido;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:login');
+
+// Salud bajo /api/ para que pase por CloudFront (/up no). Sin sesión, sin detalles.
+Route::get('/salud', SaludController::class)->middleware('throttle:api');
 
 // Toda ruta protegida: identidad (Sanctum) + organización y rol desde la membresía.
 Route::middleware(['auth:sanctum', 'throttle:api', ResolverMembresia::class])->group(function () {

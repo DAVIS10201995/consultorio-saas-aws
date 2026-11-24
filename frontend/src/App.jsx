@@ -130,6 +130,7 @@ function Citas({ token, rol, esDentista }) {
   const [nueva, setNueva] = useState({ paciente_id: '', dentista_id: '', inicio: '', duracion_min: 30 })
   const [error, setError] = useState('')
   const [filtroEstado, setFiltroEstado] = useState('')
+  const [historial, setHistorial] = useState(null)
   const [pagina, setPagina] = useState(1)
   const [ultima, setUltima] = useState(1)
   const puedeCrear = ['capturista', 'admin'].includes(rol)
@@ -160,6 +161,14 @@ function Citas({ token, rol, esDentista }) {
         }),
       })
       cargar()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function verHistorial(id) {
+    try {
+      setHistorial(await api(token, '/citas/' + id + '/historial'))
     } catch (err) {
       setError(err.message)
     }
@@ -215,6 +224,7 @@ function Citas({ token, rol, esDentista }) {
               <td>{new Date(c.inicio).toLocaleString('es-MX')}</td>
               <td>{c.estado}</td>
               <td>
+                <button onClick={() => verHistorial(c.id)}>Historial</button>
                 {permitidos(c).map((s) => (
                   <button key={s} onClick={() => cambiar(c.id, s)}>{s}</button>
                 ))}
@@ -224,6 +234,31 @@ function Citas({ token, rol, esDentista }) {
         </tbody>
       </table>
       <Paginacion pagina={pagina} ultima={ultima} onCambiar={cargar} />
+      {historial && (
+        <div>
+          <h4>
+            Historial de la cita {historial.cita_id} (DynamoDB){' '}
+            <button onClick={() => setHistorial(null)}>Cerrar</button>
+          </h4>
+          {historial.eventos.length === 0 ? (
+            <p>Sin eventos todavía: el worker los publica en unos segundos.</p>
+          ) : (
+            <table>
+              <thead><tr><th>Fecha</th><th>De</th><th>A</th><th>Usuario</th></tr></thead>
+              <tbody>
+                {historial.eventos.map((e) => (
+                  <tr key={e.event_id}>
+                    <td>{new Date(e.fecha).toLocaleString('es-MX')}</td>
+                    <td>{e.estado_anterior || '—'}</td>
+                    <td>{e.estado_nuevo}</td>
+                    <td>{e.usuario_id}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   )
 }

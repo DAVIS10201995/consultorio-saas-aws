@@ -71,6 +71,22 @@ services:
       postgres:
         condition: service_healthy
 
+  # Frontend React con Vite en http://localhost:5173 (reenvía /api a la API).
+  # Build para S3: docker compose run --rm web npm run build  -> frontend/dist
+  web:
+    image: node:24-alpine
+    working_dir: /app
+    command: ["sh", "-c", "npm ci && npm run dev"]
+    environment:
+      API_PROXY: http://api:8080
+    volumes:
+      - ./frontend:/app
+      - web_node_modules:/app/node_modules
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      - api
+
   # Publica los eventos del outbox en DynamoDB.
   worker:
     image: consultorio-api:local
@@ -99,3 +115,4 @@ services:
 volumes:
   pgdata:
   dynamodata:
+  web_node_modules:
