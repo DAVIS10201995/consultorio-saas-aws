@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Middleware\CabecerasSeguridad;
+use App\Http\Middleware\RegistroPeticion;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -15,7 +16,9 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        $middleware->api(append: [CabecerasSeguridad::class]);
+        // Al inicio de la cadena: Laravel reordena auth y throttle por prioridad, y estos dos
+        // deben envolverlos para que también los 401, 403 y 429 lleven registro y cabeceras.
+        $middleware->api(prepend: [RegistroPeticion::class, CabecerasSeguridad::class]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(
