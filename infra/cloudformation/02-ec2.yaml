@@ -136,8 +136,10 @@ Resources:
           [ -f /etc/consultorio/servicio.env ] || echo 'IMAGEN=' > /etc/consultorio/servicio.env
           chmod 0600 /etc/consultorio/servicio.env
 
-          # 7. Servicio systemd de la API. Queda habilitado pero no arranca
-          #    hasta que se defina IMAGEN en /etc/consultorio/servicio.env (#20).
+          # 7. Servicios systemd de la API y del worker del outbox. Quedan
+          #    habilitados pero no arrancan hasta que se defina IMAGEN en
+          #    /etc/consultorio/servicio.env (#20). Los dos montan el certificado
+          #    de RDS para verificar el servidor (DB_SSLMODE=verify-full).
           cat > /etc/systemd/system/consultorio-api.service <<'UNIT'
           [Unit]
           Description=API Laravel del consultorio (contenedor Docker)
@@ -155,6 +157,7 @@ Resources:
             --security-opt no-new-privileges \
             --memory 512m --pids-limit 200 \
             --env-file /etc/consultorio/api.env \
+            -v /etc/consultorio/rds-ca.pem:/etc/ssl/rds/rds-ca.pem:ro \
             -p 127.0.0.1:8080:8080 \
             ${IMAGEN}
           ExecStop=/usr/bin/docker stop -t 20 consultorio-api
@@ -164,14 +167,48 @@ Resources:
           [Install]
           WantedBy=multi-user.target
           UNIT
+
+          cat > /etc/systemd/system/consultorio-worker.service <<'UNIT'
+          [Unit]
+          Description=Worker del outbox del consultorio (publica en DynamoDB)
+          After=docker.service network-online.target
+          Requires=docker.service
+          ConditionPathExists=/etc/consultorio/api.env
+
+          [Service]
+          EnvironmentFile=/etc/consultorio/servicio.env
+          ExecStartPre=/bin/sh -c 'test -n "$IMAGEN" || { echo "IMAGEN no definida"; exit 1; }'
+          ExecStartPre=-/usr/bin/docker rm -f consultorio-worker
+          ExecStart=/usr/bin/docker run --rm --name consultorio-worker \
+            --user 33:33 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --memory 256m --pids-limit 100 \
+            --env-file /etc/consultorio/api.env \
+            -v /etc/consultorio/rds-ca.pem:/etc/ssl/rds/rds-ca.pem:ro \
+            ${IMAGEN} php artisan outbox:publicar
+          ExecStop=/usr/bin/docker stop -t 20 consultorio-worker
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
           systemctl daemon-reload
-          systemctl enable consultorio-api.service
+          systemctl enable consultorio-api.service consultorio-worker.service
 
           # 8. nginx: proxy inverso en el puerto 80 (el unico abierto, solo a CloudFront)
           cat > /etc/nginx/conf.d/consultorio.conf <<'NGINX'
-          log_format consultorio '$remote_addr [$time_iso8601] "$request" $status '
+          # IP real del cliente: la pone CloudFront en CloudFront-Viewer-Address ("ip:puerto").
+          # Es confiable porque el grupo de seguridad solo deja entrar a CloudFront.
+          map $http_cloudfront_viewer_address $ip_cliente {
+            "~^(?<ip>.+):\d+$" $ip;
+            default            $remote_addr;
+          }
+
+          log_format consultorio '$ip_cliente [$time_iso8601] "$request" $status '
                                  '$body_bytes_sent ${request_time}s req_id=$request_id '
-                                 'cf_ip="$http_x_forwarded_for" ua="$http_user_agent"';
+                                 'cf_id=$http_x_amz_cf_id ua="$http_user_agent"';
 
           server {
             listen 80 default_server;
@@ -180,26 +217,30 @@ Resources:
             client_max_body_size 5m;
             access_log /var/log/nginx/consultorio.access.log consultorio;
 
-            add_header X-Content-Type-Options "nosniff" always;
-            add_header X-Request-Id $request_id always;
-
             # Chequeo de la VM (no depende de la app)
             location = /health {
               access_log off;
               default_type text/plain;
+              add_header X-Content-Type-Options "nosniff" always;
               return 200 "ok\n";
             }
 
-            location / {
+            # Solo la API se reenvía a Laravel; las cabeceras de seguridad y X-Request-Id las pone Laravel.
+            location /api/ {
               proxy_pass http://127.0.0.1:8080;
               proxy_http_version 1.1;
               proxy_set_header Host $host;
               proxy_set_header X-Request-Id $request_id;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-For $ip_cliente;
               proxy_set_header X-Forwarded-Proto https;
               proxy_hide_header X-Powered-By;
               proxy_connect_timeout 5s;
               proxy_read_timeout 30s;
+            }
+
+            # Cualquier otra ruta (/, /up...) no se expone.
+            location / {
+              return 404;
             }
           }
           NGINX
