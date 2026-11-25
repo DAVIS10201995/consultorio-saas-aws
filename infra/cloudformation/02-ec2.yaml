@@ -1,0 +1,237 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Consultorio SaaS - EC2 de la API (issue 14). Amazon Linux 2023 con Docker
+  y nginx como proxy inverso, servicio systemd para la API, actualizaciones
+  de seguridad automaticas, IMDSv2 obligatorio, disco cifrado y acceso de
+  administracion por SSM Session Manager (sin puerto 22).
+  Requiere el stack de red (01-red.yaml).
+
+Parameters:
+  Proyecto:
+    Type: String
+    Default: consultorio
+    Description: Debe ser el mismo prefijo usado en el stack de red.
+
+  TipoInstancia:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small]
+    Description: t3.micro entra en la capa gratuita.
+
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Ultima AMI de Amazon Linux 2023 (se resuelve al desplegar).
+
+Resources:
+  # ---------- Identidad de la instancia ----------
+  # Rol para servicios, no para personas. Aqui solo SSM; los permisos de
+  # DynamoDB y del bucket de respaldos se agregan en el stack de datos (#16)
+  # con AWS::IAM::RolePolicy sobre este mismo rol.
+  RolInstancia:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Proyecto}-ec2-api"
+      Description: Rol de la EC2 de la API del consultorio
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - { Key: Proyecto, Value: !Ref Proyecto }
+
+  PerfilInstancia:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${Proyecto}-ec2-api"
+      Roles: [!Ref RolInstancia]
+
+  # ---------- Plantilla de lanzamiento ----------
+  PlantillaLanzamiento:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${Proyecto}-api"
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required # IMDSv2 obligatorio
+          # 2 saltos: el worker del outbox corre en un contenedor y necesita
+          # las credenciales del rol para escribir en DynamoDB (#8, #16).
+          HttpPutResponseHopLimit: 2
+          HttpEndpoint: enabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: 20
+              Encrypted: true
+              DeleteOnTermination: true
+
+  Instancia:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref TipoInstancia
+      IamInstanceProfile: !Ref PerfilInstancia
+      LaunchTemplate:
+        LaunchTemplateId: !Ref PlantillaLanzamiento
+        Version: !GetAtt PlantillaLanzamiento.LatestVersionNumber
+      SubnetId: !ImportValue
+        Fn::Sub: "${Proyecto}-SubredPublicaA"
+      SecurityGroupIds:
+        - !ImportValue
+          Fn::Sub: "${Proyecto}-SgEc2CloudFront"
+      Tags:
+        - { Key: Name, Value: !Sub "${Proyecto}-api" }
+        - { Key: Proyecto, Value: !Ref Proyecto }
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          # Preparacion de la VM de la API. Se ejecuta una sola vez, como root,
+          # en el primer arranque. Salida en /var/log/cloud-init-output.log.
+          set -euxo pipefail
+
+          # 1. Paquetes y actualizaciones
+          dnf -y upgrade --refresh
+          dnf -y install docker nginx dnf-automatic
+
+          # 2. Actualizaciones de seguridad automaticas (diarias)
+          sed -i 's/^upgrade_type.*/upgrade_type = security/' /etc/dnf/automatic.conf
+          sed -i 's/^apply_updates.*/apply_updates = yes/' /etc/dnf/automatic.conf
+          systemctl enable --now dnf-automatic.timer
+
+          # 3. Swap de 1 GB (t3.micro tiene 1 GB de RAM)
+          if [ ! -f /swapfile ]; then
+            dd if=/dev/zero of=/swapfile bs=1M count=1024
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo '/swapfile swap swap defaults 0 0' >> /etc/fstab
+          fi
+
+          # 4. Docker con registros en journald
+          mkdir -p /etc/docker
+          cat > /etc/docker/daemon.json <<'JSON'
+          {
+            "log-driver": "journald",
+            "live-restore": true,
+            "no-new-privileges": true
+          }
+          JSON
+          systemctl enable --now docker
+
+          # 5. Usuario de servicio sin sudo, sin shell y fuera del grupo docker.
+          #    Es duenio de la configuracion de la app; la API corre en el
+          #    contenedor como UID 33 (www-data), tampoco root.
+          id consultorio >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin consultorio
+
+          # 6. Configuracion y secretos de la API (solo root puede leerlos)
+          # La carpeta es legible (contiene el certificado publico de RDS);
+          # los archivos con secretos son 0600 de root.
+          install -d -m 0755 -o root -g root /etc/consultorio
+          [ -f /etc/consultorio/api.env ] || install -m 0600 -o root -g root /dev/null /etc/consultorio/api.env
+          [ -f /etc/consultorio/servicio.env ] || echo 'IMAGEN=' > /etc/consultorio/servicio.env
+          chmod 0600 /etc/consultorio/servicio.env
+
+          # 7. Servicio systemd de la API. Queda habilitado pero no arranca
+          #    hasta que se defina IMAGEN en /etc/consultorio/servicio.env (#20).
+          cat > /etc/systemd/system/consultorio-api.service <<'UNIT'
+          [Unit]
+          Description=API Laravel del consultorio (contenedor Docker)
+          After=docker.service network-online.target
+          Requires=docker.service
+          ConditionPathExists=/etc/consultorio/api.env
+
+          [Service]
+          EnvironmentFile=/etc/consultorio/servicio.env
+          ExecStartPre=/bin/sh -c 'test -n "$IMAGEN" || { echo "IMAGEN no definida"; exit 1; }'
+          ExecStartPre=-/usr/bin/docker rm -f consultorio-api
+          ExecStart=/usr/bin/docker run --rm --name consultorio-api \
+            --user 33:33 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --memory 512m --pids-limit 200 \
+            --env-file /etc/consultorio/api.env \
+            -p 127.0.0.1:8080:8080 \
+            ${IMAGEN}
+          ExecStop=/usr/bin/docker stop -t 20 consultorio-api
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          systemctl daemon-reload
+          systemctl enable consultorio-api.service
+
+          # 8. nginx: proxy inverso en el puerto 80 (el unico abierto, solo a CloudFront)
+          cat > /etc/nginx/conf.d/consultorio.conf <<'NGINX'
+          log_format consultorio '$remote_addr [$time_iso8601] "$request" $status '
+                                 '$body_bytes_sent ${request_time}s req_id=$request_id '
+                                 'cf_ip="$http_x_forwarded_for" ua="$http_user_agent"';
+
+          server {
+            listen 80 default_server;
+            server_name _;
+            server_tokens off;
+            client_max_body_size 5m;
+            access_log /var/log/nginx/consultorio.access.log consultorio;
+
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header X-Request-Id $request_id always;
+
+            # Chequeo de la VM (no depende de la app)
+            location = /health {
+              access_log off;
+              default_type text/plain;
+              return 200 "ok\n";
+            }
+
+            location / {
+              proxy_pass http://127.0.0.1:8080;
+              proxy_http_version 1.1;
+              proxy_set_header Host $host;
+              proxy_set_header X-Request-Id $request_id;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto https;
+              proxy_hide_header X-Powered-By;
+              proxy_connect_timeout 5s;
+              proxy_read_timeout 30s;
+            }
+          }
+          NGINX
+          # Nuestro server es default_server, asi que atiende cualquier Host
+          # (CloudFront envia el DNS de la EC2) aunque nginx.conf traiga otro.
+          nginx -t
+          systemctl enable --now nginx
+
+          echo "Preparacion terminada"
+
+  # IP fija: CloudFront apunta al DNS publico de la EC2, que cambiaria
+  # si la instancia se detiene y se vuelve a encender.
+  IpElastica:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref Instancia
+      Tags:
+        - { Key: Name, Value: !Sub "${Proyecto}-api" }
+
+Outputs:
+  InstanciaId:
+    Value: !Ref Instancia
+    Export: { Name: !Sub "${Proyecto}-InstanciaApi" }
+  IpPublica:
+    Value: !Ref IpElastica
+  DnsPublico:
+    Description: Origen de CloudFront para /api/*
+    Value: !Sub
+      - "ec2-${Guiones}.${AWS::Region}.compute.amazonaws.com"
+      - Guiones: !Join ["-", !Split [".", !Ref IpElastica]]
+    Export: { Name: !Sub "${Proyecto}-DnsApi" }
+  RolInstancia:
+    Value: !Ref RolInstancia
+    Export: { Name: !Sub "${Proyecto}-RolInstanciaApi" }

@@ -1,0 +1,207 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Consultorio SaaS - Red (issue 13). VPC con una subred publica para la EC2
+  y dos privadas para RDS (el subnet group exige dos zonas). Sin NAT Gateway.
+  Grupos de seguridad: EC2 solo acepta CloudFront en el puerto 80 y SSH solo
+  desde la IP del administrador; RDS solo acepta la EC2 en el 5432.
+
+Parameters:
+  Proyecto:
+    Type: String
+    Default: consultorio
+    Description: Prefijo para nombres y exportaciones.
+
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/16
+
+  CloudFrontPrefixListId:
+    Type: String
+    AllowedPattern: "^pl-[0-9a-f]+$"
+    Description: >
+      ID de com.amazonaws.global.cloudfront.origin-facing en la region
+      (aws ec2 describe-managed-prefix-lists).
+
+  AdminCidr:
+    Type: String
+    Default: ""
+    Description: >
+      Tu IP publica con /32 para SSH. Dejar vacio si se usa solo
+      SSM Session Manager (sin puerto 22 abierto).
+
+Conditions:
+  ConSsh: !Not [!Equals [!Ref AdminCidr, ""]]
+
+Resources:
+  # ---------- VPC e Internet ----------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true # la EC2 necesita DNS publico para ser origen de CloudFront
+      Tags:
+        - { Key: Name, Value: !Sub "${Proyecto}-vpc" }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub "${Proyecto}-igw" }
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # ---------- Subred publica (EC2) ----------
+  SubredPublicaA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 8]] # 10.20.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub "${Proyecto}-publica-a" }
+
+  TablaRutasPublica:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${Proyecto}-rt-publica" }
+
+  RutaInternet:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref TablaRutasPublica
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  AsociacionPublicaA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubredPublicaA
+      RouteTableId: !Ref TablaRutasPublica
+
+  # ---------- Subredes privadas (RDS) ----------
+  # Su tabla de rutas solo tiene la ruta local: no hay salida a Internet.
+  SubredPrivadaA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 4, 8]] # 10.20.2.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub "${Proyecto}-privada-a" }
+
+  SubredPrivadaB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 4, 8]] # 10.20.3.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub "${Proyecto}-privada-b" }
+
+  TablaRutasPrivada:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${Proyecto}-rt-privada" }
+
+  AsociacionPrivadaA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubredPrivadaA
+      RouteTableId: !Ref TablaRutasPrivada
+
+  AsociacionPrivadaB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubredPrivadaB
+      RouteTableId: !Ref TablaRutasPrivada
+
+  # ---------- Grupos de seguridad ----------
+  # La lista de prefijos de CloudFront ocupa ~55 reglas del limite de 60,
+  # por eso va sola en su propio grupo.
+  SgEc2CloudFront:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${Proyecto}-ec2-desde-cloudfront"
+      GroupDescription: HTTP a la EC2 solo desde los origin-facing de CloudFront
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontPrefixListId
+          Description: CloudFront origin-facing
+      Tags:
+        - { Key: Name, Value: !Sub "${Proyecto}-sg-ec2-cloudfront" }
+
+  SgEc2Admin:
+    Type: AWS::EC2::SecurityGroup
+    Condition: ConSsh
+    Properties:
+      GroupName: !Sub "${Proyecto}-ec2-admin"
+      GroupDescription: SSH solo desde la IP del administrador
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AdminCidr
+          Description: SSH administrador
+      Tags:
+        - { Key: Name, Value: !Sub "${Proyecto}-sg-ec2-admin" }
+
+  SgRds:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${Proyecto}-rds"
+      GroupDescription: PostgreSQL solo desde la EC2 de la aplicacion
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref SgEc2CloudFront
+          Description: EC2 de la aplicacion
+      # Sin salida: la base no inicia conexiones.
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 127.0.0.1/32
+          Description: Sin salida (regla placeholder)
+      Tags:
+        - { Key: Name, Value: !Sub "${Proyecto}-sg-rds" }
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+    Export: { Name: !Sub "${Proyecto}-VpcId" }
+  SubredPublicaA:
+    Value: !Ref SubredPublicaA
+    Export: { Name: !Sub "${Proyecto}-SubredPublicaA" }
+  SubredPrivadaA:
+    Value: !Ref SubredPrivadaA
+    Export: { Name: !Sub "${Proyecto}-SubredPrivadaA" }
+  SubredPrivadaB:
+    Value: !Ref SubredPrivadaB
+    Export: { Name: !Sub "${Proyecto}-SubredPrivadaB" }
+  SgEc2CloudFront:
+    Value: !Ref SgEc2CloudFront
+    Export: { Name: !Sub "${Proyecto}-SgEc2CloudFront" }
+  SgEc2Admin:
+    Condition: ConSsh
+    Value: !Ref SgEc2Admin
+    Export: { Name: !Sub "${Proyecto}-SgEc2Admin" }
+  SgRds:
+    Value: !Ref SgRds
+    Export: { Name: !Sub "${Proyecto}-SgRds" }

@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Consultorio SaaS - Datos (issues 15, 16 y 18). RDS PostgreSQL privada,
+  cifrada y con TLS obligatorio; tabla DynamoDB de la bitacora cifrada;
+  bucket privado de respaldos; y permisos minimos para el rol de la EC2
+  (PutItem y Query en DynamoDB, DeleteItem denegado; solo subir respaldos).
+  Requiere los stacks de red (01-red.yaml) y EC2 (02-ec2.yaml).
+
+Parameters:
+  Proyecto:
+    Type: String
+    Default: consultorio
+    Description: Debe ser el mismo prefijo usado en los otros stacks.
+
+  ClaseInstancia:
+    Type: String
+    Default: db.t4g.micro
+    AllowedValues: [db.t4g.micro, db.t3.micro]
+    Description: Ambas entran en la capa gratuita.
+
+  VersionPostgres:
+    Type: String
+    Default: "17"
+    Description: Version mayor; RDS elige la menor por defecto.
+
+  FamiliaParametros:
+    Type: String
+    Default: postgres17
+    Description: Debe coincidir con la version mayor.
+
+  NombreBase:
+    Type: String
+    Default: consultorio
+    AllowedPattern: "^[a-z][a-z0-9_]*$"
+
+Resources:
+  # ======================= RDS PostgreSQL (#15) =======================
+  GrupoSubredesRds:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub "${Proyecto}-rds"
+      DBSubnetGroupDescription: Subredes privadas, sin ruta a Internet
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: "${Proyecto}-SubredPrivadaA"
+        - !ImportValue
+          Fn::Sub: "${Proyecto}-SubredPrivadaB"
+
+  ParametrosRds:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      DBParameterGroupName: !Sub "${Proyecto}-pg"
+      Description: TLS obligatorio y registro de conexiones
+      Family: !Ref FamiliaParametros
+      Parameters:
+        rds.force_ssl: "1" # rechaza conexiones sin TLS (P06)
+        ssl_min_protocol_version: TLSv1.2
+        password_encryption: scram-sha-256
+        log_connections: "1"
+        log_disconnections: "1"
+
+  BaseDatos:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete # el retiro (#33) no debe dejar snapshots con costo
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub "${Proyecto}-pg"
+      Engine: postgres
+      EngineVersion: !Ref VersionPostgres
+      DBInstanceClass: !Ref ClaseInstancia
+      DBName: !Ref NombreBase
+      AllocatedStorage: "20"
+      StorageType: gp3
+      StorageEncrypted: true # llave KMS administrada por AWS (aws/rds)
+      MasterUsername: postgres_admin
+      ManageMasterUserPassword: true # la contrasena vive en Secrets Manager, no aqui
+      DBSubnetGroupName: !Ref GrupoSubredesRds
+      DBParameterGroupName: !Ref ParametrosRds
+      VPCSecurityGroups:
+        - !ImportValue
+          Fn::Sub: "${Proyecto}-SgRds"
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 1
+      CopyTagsToSnapshot: true
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: false
+      EnablePerformanceInsights: false
+      EnableCloudwatchLogsExports: [postgresql]
+      Tags:
+        - { Key: Proyecto, Value: !Ref Proyecto }
+
+  # ======================= DynamoDB (#16) =======================
+  # PK = ORG#<org>#CITA#<id>   SK = EVT#<fecha>#<event_id>   (issue 8)
+  TablaBitacora:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub "${Proyecto}-bitacora-citas"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      SSESpecification:
+        SSEEnabled: true # llave KMS administrada por AWS (aws/dynamodb)
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true # para la prueba de restauracion (P11)
+      Tags:
+        - { Key: Proyecto, Value: !Ref Proyecto }
+
+  # ======================= Bucket de respaldos (#18) =======================
+  BucketRespaldos:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete # CloudFormation no borra un bucket con objetos: vaciarlo antes (#33)
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub "${Proyecto}-respaldos-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled # un respaldo sobrescrito o borrado se puede recuperar
+      LifecycleConfiguration:
+        Rules:
+          - Id: caducar-respaldos
+            Status: Enabled
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - { Key: Proyecto, Value: !Ref Proyecto }
+
+  PoliticaBucketRespaldos:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BucketRespaldos
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SoloTLS
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt BucketRespaldos.Arn
+              - !Sub "${BucketRespaldos.Arn}/*"
+            Condition:
+              Bool: { "aws:SecureTransport": "false" }
+
+  # ======================= Permisos del rol de la EC2 (#16) =======================
+  PoliticaRolEc2:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !ImportValue
+        Fn::Sub: "${Proyecto}-RolInstanciaApi"
+      PolicyName: !Sub "${Proyecto}-datos-minimo"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: BitacoraEscribirYConsultar
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem # incluye la escritura condicional (idempotencia)
+              - dynamodb:Query
+            Resource: !GetAtt TablaBitacora.Arn
+          - Sid: BitacoraNuncaBorrar
+            Effect: Deny
+            Action:
+              - dynamodb:DeleteItem
+              - dynamodb:BatchWriteItem # tambien puede borrar
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteTable
+            Resource: !GetAtt TablaBitacora.Arn
+          - Sid: RespaldosSoloSubir
+            Effect: Allow
+            Action: s3:PutObject
+            Resource: !Sub "${BucketRespaldos.Arn}/pg_dump/*"
+
+Outputs:
+  RdsEndpoint:
+    Description: DB_HOST de la API
+    Value: !GetAtt BaseDatos.Endpoint.Address
+    Export: { Name: !Sub "${Proyecto}-RdsEndpoint" }
+  RdsSecretoMaestro:
+    Description: Secreto de Secrets Manager con la contrasena de postgres_admin
+    Value: !GetAtt BaseDatos.MasterUserSecret.SecretArn
+  TablaBitacora:
+    Value: !Ref TablaBitacora
+    Export: { Name: !Sub "${Proyecto}-TablaBitacora" }
+  BucketRespaldos:
+    Value: !Ref BucketRespaldos
+    Export: { Name: !Sub "${Proyecto}-BucketRespaldos" }
